@@ -1,61 +1,159 @@
-const express = require('express');
-const http = require('http');
-const { WebSocketServer, WebSocket } = require('ws');
-const path = require('path');
-
-const API_KEY = process.env.SUN_API_KEY || 'YOUR_API_KEY_HERE';
-const SUN_WS = 'wss://api.getsun.io/ws';
-const PORT = 3000;
-
-const app = express();
-app.use(express.static(path.join(__dirname)));
-
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
-
-wss.on('connection', (clientWs) => {
-  console.log('Browser connected, opening Sun WebSocket...');
-
-  const sunWs = new WebSocket(SUN_WS, {
-    headers: { 'Authorization': `Bearer ${API_KEY}` }
-  });
-
-  sunWs.on('open', () => {
-    console.log('Connected to Sun API');
-  });
-
-  sunWs.on('message', (data) => {
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(data.toString());
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sun Voice Chat</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0a0a0f;
+      color: #e0e0e0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
     }
-  });
 
-  sunWs.on('close', (code, reason) => {
-    console.log(`Sun closed: ${code} ${reason}`);
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close(code, reason.toString());
+    #status {
+      font-size: 14px;
+      color: #888;
+      margin-bottom: 32px;
+      text-align: center;
+      min-height: 20px;
     }
-  });
 
-  sunWs.on('error', (err) => {
-    console.error('Sun error:', err.message);
-    clientWs.close();
-  });
-
-  clientWs.on('message', (data) => {
-    if (sunWs.readyState === WebSocket.OPEN) {
-      sunWs.send(data.toString());
+    #orb-container {
+      position: relative;
+      width: 180px;
+      height: 180px;
+      margin-bottom: 40px;
     }
-  });
 
-  clientWs.on('close', () => {
-    console.log('Browser disconnected');
-    if (sunWs.readyState === WebSocket.OPEN) {
-      sunWs.close();
+    #orb {
+      width: 180px;
+      height: 180px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 40% 40%, #1a1a2e, #0a0a14);
+      border: 2px solid #1a1a2e;
+      transition: box-shadow 0.3s, border-color 0.3s;
     }
-  });
-});
 
-server.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-});
+    #orb.listening {
+      border-color: #3b82f6;
+      box-shadow: 0 0 40px rgba(59, 130, 246, 0.3), 0 0 80px rgba(59, 130, 246, 0.1);
+      animation: pulse-listen 2s ease-in-out infinite;
+    }
+
+    #orb.agent-speaking {
+      border-color: #8b5cf6;
+      box-shadow: 0 0 40px rgba(139, 92, 246, 0.4), 0 0 80px rgba(139, 92, 246, 0.15);
+      animation: pulse-speak 0.8s ease-in-out infinite;
+    }
+
+    @keyframes pulse-listen {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.03); }
+    }
+
+    @keyframes pulse-speak {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.06); }
+    }
+
+    #caption {
+      width: 90%;
+      max-width: 500px;
+      text-align: center;
+      font-size: 18px;
+      min-height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.6s ease;
+    }
+
+    #caption.user { color: #93c5fd; }
+    #caption.agent { color: #c4b5fd; }
+    #caption.fade-out { opacity: 0; }
+
+    #text-input-bar {
+      position: fixed;
+      bottom: 24px;
+      display: flex;
+      gap: 8px;
+      width: 90%;
+      max-width: 500px;
+    }
+
+    #text-input-bar input {
+      flex: 1;
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1px solid #333;
+      background: #161622;
+      color: #e0e0e0;
+      font-size: 15px;
+      outline: none;
+    }
+    #text-input-bar input:focus { border-color: #3b82f6; }
+    #text-input-bar input::placeholder { color: #555; }
+
+    #text-input-bar button {
+      padding: 10px 18px;
+      border-radius: 8px;
+      border: none;
+      background: #3b82f6;
+      color: #fff;
+      font-size: 15px;
+      cursor: pointer;
+    }
+    #text-input-bar button:hover { background: #2563eb; }
+  </style>
+</head>
+<body>
+  <div id="status">Connecting...</div>
+  <div id="orb-container">
+    <div id="orb"></div>
+  </div>
+  <div id="caption"></div>
+  <div id="text-input-bar">
+    <input type="text" id="text-input" placeholder="Type a message (or use mic)..." />
+    <button id="text-send">Send</button>
+  </div>
+
+  <script>
+    const wsParam = new URLSearchParams(location.search).get('ws');
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const WS_URL = wsParam || `${wsProto}://${location.host}/ws`;
+    const statusEl = document.getElementById('status');
+    const orbEl = document.getElementById('orb');
+    const captionEl = document.getElementById('caption');
+    const textInput = document.getElementById('text-input');
+    const textSend = document.getElementById('text-send');
+    let ws=null,sessionId=null,recognition=null,nextPlayTime=0,currentResponseId=null,agentSpeaking=false,fadeTimer=null,responseDoneTimer=null,agentSentences=[],receivedAudioChunk=false,reconnectTimer=null;
+    const audioCtx = new AudioContext({sampleRate:24000});audioCtx.resume();
+    function sendTextMessage(t){if(!t.trim())return;showCaption(t,'user');scheduleFade(1500);send('text.full',{text:t,speaker:'User'});send('trigger.speak',{ text:t,speaker:'User'})}
+    textSend.addEventListener('click',()=>{sendTextMessage(textInput.value);textInput.value=''});
+    textInput.addEventListener('keydown',e=>{if(e.key==='Enter'){sendTextMessage(textInput.value);textInput.value=''}});
+    function showCaption(t,w){if(fadeTimer)clearTimeout(fadeTimer);captionEl.classList.remove('fade-out');captionEl.className=w;captionEl.textContent=t}
+    function scheduleFade(d){if(fadeTimer)clearTimeout(fadeTimer);fadeTimer=setTimeout(()=>captionEl.classList.add('fade-out'),d)}
+    function send(t,p){if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:t,payload:p}))}
+    function playPCM(b64,rid){if(rid!==currentResponseId)return;receivedAudioChunk=true;const r=atob(b64),l=r.length/2,f=new Float32Array(l);for(let i=0;i<l;i++){const lo=r.charCodeAt(i*2),hi=r.charCodeAt(i*2+1);let s=(hi<<8)|lo;if(s>=0x8000)s-=0x10000;f[i]=s/32768}const buf=audioCtx.createBuffer(1,f.length,24000);buf.getChannelData(0).set(f);const src=audioCtx.createBufferSource();src.buffer=buf;src.connect(audioCtx.destination);const n=audioCtx.currentTime;if(nextPlayTime<n)nextPlayTime=n;src.start(nextPlayTime);nextPlayTime+=buf.duration}
+    let ttsQueue=[],ttsSpeaking=false;
+    function speakText(t){if(!window.speechSynthesis||receivedAudioChunk)return;ttsQueue.push(t);if(!ttsSpeaking)drainTTSQueue()}
+    function drainTTSQueue(){if(!ttsQueue.length){ttsSpeaking=false;return}ttsSpeaking=true;const u=new SpeechSynthesisUtterance(ttsQueue.shift());u.rate=1.05;u.pitch=1;u.onend=()=>drainTTSQueue();u.onerror=()=>drainTTSQueue();speechSynthesis.speak(u)}
+    function stopTTS(){ttsQueue=[];ttsSpeaking=false;if(window.speechSynthesis)speechSynthesis.cancel()}
+    function stopAudio(){nextPlayTime=0;stopTTS();agentSpeaking=false;orbEl.className='listening'}
+    function resetResponseDoneTimer(){if(responseDoneTimer)clearTimeout(responseDoneTimer);responseDoneTimer=setTimeout(()=>{if(agentSpeaking){agentSpeaking=false;orbEl.className='listening';scheduleFade(3000)}},3000)}
+    function connect(){if(reconnectTimer){clearTimeout(reconnectTimer);reconnectTimer=null}if(ws&&(ws.readyState===WebSocket.OPEN||ws.readyState===WebSocket.CONNECTING))return;ws=new WebSocket(WS_URL);ws.onopen=()=>statusEl.textContent='Connected. Waiting for session...';ws.onmessage=e=>handleServerEvent(JSON.parse(e.data));ws.onclose=e=>{statusEl.textContent=`Disconnected (${e.code}). Reconnecting...`;orbEl.className='';stopRecognition();stopAudio();ws=null;if(!reconnectTimer)reconnectTimer=setTimeout(connect,3000)};ws.onerror=()=>statusEl.textContent='Connection error.'}
+    function handleServerEvent(m){const p=m.payload||{};switch(m.type){case'connection.established':sessionId=p.session_id;receivedAudioChunk=false;statusEl.textContent='Ready — start speaking';send('config.update',{bot_name:'Orbit',barge_in_prevention:true,interruption_use_full_text:true});send('context.update',{text:`You are Orbit, an AI Scrum Master assistant for Sun (getsun.io) team standups. Facilitate daily standups efficiently. Upbeat, direct, focused. Run: 1.Open 2.Round 3.Blockers 4.Close. Keep updates 60-90s. End with top 3 priorities, blockers, follow-ups.`});startRecognition();break;case'response.started':stopTTS();if(responseDoneTimer)clearTimeout(responseDoneTimer);currentResponseId=m.response_id||p.response_id;agentSpeaking=true;agentSentences=[];orbEl.className='agent-speaking';nextPlayTime=0;break;case'response.text':{const t=p.text||m.text;if(t){agentSentences.push(t);showCaption(agentSentences.join(' '),'agent');speakText(t);resetResponseDoneTimer()}break}case'audio.chunk':playPCM(m.data||p.data,m.response_id||p.response_id||currentResponseId);resetResponseDoneTimer();break;case'audio.interrupted':stopAudio();if(responseDoneTimer)clearTimeout(responseDoneTimer);break;case'response.done':if(responseDoneTimer)clearTimeout(responseDoneTimer);agentSpeaking=false;orbEl.className='listening';scheduleFade(3000);break;case'error':console.error('Sun error:',m);statusEl.textContent=`Error: ${p.code||m.code||'unknown'}`;break}}
+    function startRecognition(){const S=window.SpeechRecognition||window.webkitSpeechRecognition;if(!S){statusEl.textContent='No mic — use text input.';return}recognition=new S;recognition.continuous=true;recognition.interimResults=true;recognition.lang='en-US';recognition.onstart=()=>orbEl.className='listening';recognition.onresult=e=>{let int='';for(let i=e.resultIndex;i<e.results.length;i++){const r=e.results[i];if(r.isFinal){const t=r[0].transcript.trim();if(!t)continue;showCaption(t,'user');scheduleFade(1500);send('text.full',{text:t,speaker:'User'});send('trigger.speak',{ text:t,speaker:'User'})}else{int+=r[0].transcript}}if(int){showCaption(int,'user');send('text.partial',{text:int,speaker:'User'})}};recognition.onerror=e=>{if(e.error==='not-allowed'){statusEl.textContent='Mic denied.';orbEl.className=''}};recognition.onend=()=>{if(ws&&ws.readyState===WebSocket.OPEN)setTimeout(()=>{if(recognition&&ws&&ws.readyState===WebSocket.OPEN)try{recognition.start()}catch(e){}},300)};recognition.start()}
+    function stopRecognition(){if(recognition){try{recognition.abort()}catch(e){}recognition=null}}
+    connect();
+  </script>
+</body>
+</html>
